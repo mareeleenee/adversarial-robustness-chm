@@ -3,7 +3,7 @@
 ## Credits
 
 This project is based on the original project:
-https://github.com/ORIGINAL_AUTHOR/ORIGINAL_REPO
+https://github.com/kuangliu/pytorch-cifar
 
 The code has been modified and extended for my own use.
 
