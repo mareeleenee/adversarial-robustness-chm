@@ -30,8 +30,8 @@ parser.add_argument('--lam_hull', default=0.005, type=float, help='hull regulari
 parser.add_argument('--N_hull', default=2, type=int, help='number of hull adversarial variants')
 # AT strength
 parser.add_argument('--steps', default=5, type=int, help='PGD training steps')
+parser.add_argument('--beta', default=6.0, type=float, help='TRADES beta')
 args = parser.parse_args()
-parser.add_argument('--eval_only', action='store_true')
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 best_acc = 0  # best test accuracy
@@ -143,6 +143,42 @@ optimizer = optim.SGD(net.parameters(), lr=args.lr,
                       momentum=0.9, weight_decay=5e-4)
 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
 
+def clamp(X, lower_limit, upper_limit):
+    return torch.max(torch.min(X, upper_limit), lower_limit)
+
+def trades_pgd_attack(model, x, eps, alpha, steps):
+    """
+    TRADES adversary: maximize KL( p(model(x)) || p(model(x_adv)) )
+    x is already normalized (as in your pipeline). So we constrain in normalized space.
+    """
+    model.eval()
+
+    x_adv = x.detach() + 0.001 * torch.randn_like(x).detach()
+    x_adv = x_adv.detach()
+
+    with torch.no_grad():
+        logits_clean = model(x)
+        p_clean = F.softmax(logits_clean, dim=1)
+
+    for _ in range(steps):
+        x_adv.requires_grad_(True)
+
+        logits_adv = model(x_adv)
+        logp_adv = F.log_softmax(logits_adv, dim=1)
+
+        # KL(p_clean || p_adv) = sum p_clean * (log p_clean - log p_adv)
+        # constant term dropped -> minimize -sum p_clean * logp_adv
+        loss_kl = F.kl_div(logp_adv, p_clean, reduction='batchmean')
+
+        grad = torch.autograd.grad(loss_kl, [x_adv])[0]
+        x_adv = x_adv.detach() + alpha * torch.sign(grad.detach())
+
+        # project back to Linf ball around x (normalized space)
+        x_adv = torch.max(torch.min(x_adv, x + eps), x - eps)
+        x_adv = x_adv.detach()
+
+    return x_adv
+
 def hull_margin_loss(logits_stack, targets):
     """
     logits_stack: [N, B, C]
@@ -192,16 +228,14 @@ def train(epoch):
         # --- Generate N_hull adversarial variants (random starts) ---
         # Attack generation is more stable in eval mode
        # --- Generate N_hull adversarial variants (in eval mode) ---
+        # --- generate N_hull TRADES adversaries ---
         net.eval()
         adv_list = []
         for _ in range(N_hull):
-            x_adv = atk(inputs, targets)
+            x_adv = trades_pgd_attack(net, inputs, eps=eps, alpha=alpha, steps=steps)
             adv_list.append(x_adv.detach())
 
-        # IMPORTANT: clear any grads possibly created during attack generation
         optimizer.zero_grad(set_to_none=True)
-
-        # --- Compute all training losses in train mode ---
         net.train()
 
         # logits for hull term (train mode!)
