@@ -1,3 +1,6 @@
 __pycache__/
 checkpoint/
 output/
+data/
+.claude/
+models/__pycache__/
